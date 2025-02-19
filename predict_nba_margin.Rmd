@@ -1,0 +1,77 @@
+---
+title: "Margin Predicter"
+author: "Sean Slattery"
+date: "2025-02-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(xgboost)
+
+# Function to Predict Margin for an Upcoming Game
+predict_nba_margin <- function(team_a_id, team_b_id, new_spread) {
+  
+  # Filter for past matchups between these two teams
+  past_matchups <- nba_data %>%
+    filter((TeamID == team_a_id & OpponentID == team_b_id) | 
+           (TeamID == team_b_id & OpponentID == team_a_id))
+  
+  # Check if there are past games available
+  if (nrow(past_matchups) == 0) {
+    stop("❌ No past matchups found between these teams!")
+  }
+  
+  # Select the most recent matchup (highest GameID)
+  latest_matchup <- past_matchups %>%
+    filter(GameID == max(GameID)) %>%
+    select(DiffSRS, DiffMOV, DiffPL, DiffORtg, DiffDRtg, 
+           DiffSOS, PGDiffFTPerc, DiffNRtg, Spread, DiffPW, 
+           DiffAge, DiffW)
+  
+  # Ensure feature names match the model's expected features
+  colnames(latest_matchup) <- colnames(train_matrix)
+  
+  # Add missing features with default values (0)
+  for (feature in final_model$feature_names) {
+    if (!(feature %in% colnames(latest_matchup))) {
+      latest_matchup[[feature]] <- 0  # Default value
+    }
+  }
+  
+  # Reorder columns to match the model's expected order
+  latest_matchup <- latest_matchup[, final_model$feature_names]
+  
+  # Convert to XGBoost DMatrix
+  latest_matchup_matrix <- xgb.DMatrix(data = as.matrix(latest_matchup))
+  
+  # Predict the margin
+  predicted_margin <- predict(final_model, newdata = latest_matchup_matrix)
+  
+  # Print result
+  print(paste("Predicted Margin (Home - Away):", predicted_margin))
+  
+  # Compare against spread
+  spread_difference <- predicted_margin - new_spread
+  print(paste("Difference Between Prediction and Spread:", spread_difference))
+  
+  return(list(predicted_margin = predicted_margin, spread_difference = spread_difference))
+}
+
+
+
+
+
+```
+
+
+
+```{r}
+predict_nba_margin(team_a_id = 10, team_b_id = 11, new_spread = 0)
+```
+

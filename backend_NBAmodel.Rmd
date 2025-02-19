@@ -1,0 +1,508 @@
+---
+title: "NBA_Regression_ATS_Analysis"
+author: "Sean Slattery"
+date: "2025-02-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r}
+library(dplyr)
+library(caret)
+library(readxl)
+# Load dataset
+nba_data <- read_excel("C:\\Users\\seani\\Downloads\\NBADATASET2425.xlsx")  # Replace with actual file path
+
+# Remove non-numeric columns
+nba_data <- nba_data %>% select(-c(Team, Opponent))
+
+# Ensure all columns are numeric
+nba_data <- nba_data %>% mutate_if(is.character, as.numeric)
+
+
+
+
+# Split data into training & testing sets (80/20 split)
+set.seed(42)  # For reproducibility
+train_index <- createDataPartition(nba_data$Margin, p = 0.8, list = FALSE)
+train_data <- nba_data[train_index, ]
+test_data <- nba_data[-train_index, ]
+
+```
+
+```{r}
+# Train linear regression model
+lm_model <- lm(Margin ~ ., data = train_data)
+
+# Evaluate model performance
+summary(lm_model)  # Check coefficients & R-squared
+
+# Make predictions
+lm_predictions <- predict(lm_model, test_data)
+
+# Calculate RMSE
+rmse_lm <- sqrt(mean((lm_predictions - test_data$Margin)^2))
+print(rmse_lm)
+
+```
+
+```{r}
+library(randomForest)
+
+# Train Random Forest Model
+rf_model <- randomForest(Margin ~ ., data = train_data, ntree = 500, mtry = 10, importance = TRUE)
+
+# Make predictions
+rf_predictions <- predict(rf_model, test_data)
+
+# Calculate RMSE
+rmse_rf <- sqrt(mean((rf_predictions - test_data$Margin)^2))
+print(rmse_rf)
+
+# Check feature importance
+importance(rf_model)
+varImpPlot(rf_model)
+
+```
+```{r}
+# Load necessary libraries
+library(xgboost)
+library(caret)
+library(dplyr)
+
+# Load dataset (assuming it's already cleaned and numeric)
+data <- read_excel("C:\\Users\\seani\\Downloads\\NBADATASET2425.xlsx")
+
+# Remove non-numeric columns & set Spread as target
+data <- data %>% select(-c(GameID, Team, Opponent, TeamID, Margin))
+
+# Feature engineering: Adding interaction terms
+data <- data %>%
+  mutate(DiffORtg_DiffDRtg = DiffORtg * DiffDRtg,
+         DiffMOV_DiffPace = DiffMOV * DiffPace,
+         DiffTS_DiffFTr = DiffTS * DiffFTr)
+
+# Convert to matrix format for XGBoost
+target <- data$Spread
+features <- data %>% select(-Spread) %>% as.matrix()
+
+# Split into train/test sets
+set.seed(123)
+train_index <- createDataPartition(target, p=0.8, list=FALSE)
+train_x <- features[train_index, ]
+train_y <- target[train_index]
+test_x <- features[-train_index, ]
+test_y <- target[-train_index]
+
+# XGBoost Model
+xgb_train <- xgb.DMatrix(data=train_x, label=train_y)
+xgb_test <- xgb.DMatrix(data=test_x, label=test_y)
+
+# Set XGBoost parameters
+params <- list(
+  objective = "reg:squarederror",
+  eta = 0.1, # Learning rate
+  max_depth = 6, # Tree depth
+  subsample = 0.8, # Row sampling
+  colsample_bytree = 0.8 # Feature sampling
+)
+
+# Train the XGBoost model
+xgb_model <- xgb.train(params=params, data=xgb_train, nrounds=100, watchlist=list(train=xgb_train, test=xgb_test), print_every_n=10)
+
+# Predictions
+preds <- predict(xgb_model, xgb_test)
+
+# RMSE Calculation
+rmse <- sqrt(mean((preds - test_y)^2))
+print(paste("XGBoost RMSE:", rmse))
+
+# Feature importance plot
+importance <- xgb.importance(model=xgb_model)
+xgb.plot.importance(importance)
+
+```
+
+
+
+
+```{r}
+library(xgboost)
+library(caret)
+library(Matrix)
+library(dplyr)
+library(ggplot2)
+
+```
+
+
+```{r}
+# Drop TeamID and retrain
+data <- your_dataframe %>% select(-c(GameID, Team, Opponent, TeamID)) 
+
+# Train/Test Split
+set.seed(42)
+train_index <- createDataPartition(data$Spread, p = 0.8, list = FALSE)
+train_data <- data[train_index, ]
+test_data  <- data[-train_index, ]
+
+# Convert to XGBoost matrix
+dtrain <- xgb.DMatrix(data = as.matrix(train_data %>% select(-Spread)), label = train_data$Spread)
+dtest  <- xgb.DMatrix(data = as.matrix(test_data %>% select(-Spread)), label = test_data$Spread)
+
+# Train new XGBoost model
+params <- list(
+  objective = "reg:squarederror",
+  max_depth = 6,
+  eta = 0.1,
+  subsample = 0.9,
+  colsample_bytree = 0.9
+)
+
+best_model <- xgb.train(
+  params = params, 
+  data = dtrain, 
+  nrounds = 100, 
+  watchlist = list(train = dtrain, test = dtest),
+  early_stopping_rounds = 10,
+  verbose = 0
+)
+
+# Evaluate performance
+preds <- predict(best_model, dtest)
+rmse <- sqrt(mean((preds - test_data$Spread)^2))
+print(paste("New RMSE (without TeamID):", rmse))
+
+# Feature importance after TeamID removal
+importance_matrix <- xgb.importance(model = best_model)
+xgb.plot.importance(importance_matrix, top_n = 20)
+
+
+```
+```{r}
+importance_matrix <- xgb.importance(model = best_model)
+xgb.plot.importance(importance_matrix, top_n = 20)
+
+```
+```{r}
+# Make predictions
+preds <- predict(best_model, dtest)
+
+# Compute RMSE
+rmse <- sqrt(mean((preds - test_data$Spread)^2))
+print(paste("Final Model RMSE:", rmse))
+
+# Residuals Plot
+residuals <- preds - test_data$Spread
+ggplot(data.frame(Predicted = preds, Residuals = residuals), aes(x = Predicted, y = Residuals)) +
+  geom_point(alpha = 0.5) + geom_hline(yintercept = 0, color = "red") +
+  theme_minimal() + ggtitle("Residual Plot")
+
+```
+```{r}
+# Create interaction terms
+
+df <- data
+df$FG3_Impact <- df$PGDiff3Perc * df$PGDiff3PA
+df$FT_Impact <- df$PGDiffFTPerc * df$PGDiffFTA
+df$TOV_Pace <- df$DiffTOV * df$DiffPace
+df$Def_Reb_Impact <- df$DiffDRtg * df$PGDiffTRB
+
+
+# Retrain XGBoost with new features
+new_model <- xgboost(data = as.matrix(df[,-c(1:3)]), label = df$Spread, 
+                      nrounds = 500, objective = "reg:squarederror")
+
+# Evaluate new RMSE
+new_preds <- predict(new_model, as.matrix(df[,-c(1:3)]))
+new_rmse <- sqrt(mean((new_preds - df$Spread)^2))
+print(paste("New RMSE with Interaction Terms:", new_rmse))
+
+
+importance_matrix <- xgb.importance(model = new_model)
+xgb.plot.importance(importance_matrix, top_n = 20)
+
+
+```
+```{r}
+cor_matrix <- cor(df[, -which(names(df) %in% c("GameID", "Margin", "Spread"))], df$Margin)
+cor_matrix_sorted <- sort(abs(cor_matrix), decreasing = TRUE)
+head(cor_matrix_sorted, 20)  # Top 20 highest correlations
+
+```
+
+```{r}
+r2_before <- summary(lm(Margin ~ ., data = train_data))$r.squared
+r2_after <- summary(lm(Margin ~ . + .^2, data = df))$r.squared  # Includes interaction terms
+
+print(paste("R² Before:", r2_before))
+print(paste("R² After:", r2_after))
+
+
+```
+
+
+```{r}
+
+
+
+
+
+
+
+
+
+
+
+
+params <- list(
+  objective = "reg:squarederror", 
+  max_depth = 6,
+  eta = 0.05,
+  nthread = 4,
+  lambda = 0.1,
+  alpha = 0.1
+)
+
+final_model <- xgb.train(params = params, data = dtrain, nrounds = 500)
+
+# Save model
+save(final_model, file = "final_model.RData")
+
+predictions <- predict(final_model, newdata = dtest)
+print(predictions)
+
+
+
+```
+
+
+
+```{r}
+train_matrix <- as.matrix(train_data[, -which(names(train_data) == "Margin")])
+test_matrix <- as.matrix(test_data[, -which(names(test_data) == "Margin")])
+
+
+
+pred_train <- predict(final_model, newdata = train_matrix)
+rmse_train <- sqrt(mean((pred_train - train_data$Margin)^2))
+
+pred_test <- predict(final_model, newdata = test_matrix)
+rmse_test <- sqrt(mean((pred_test - test_data$Margin)^2))
+
+print(paste("Train RMSE:", rmse_train))
+print(paste("Test RMSE:", rmse_test))
+
+
+
+
+```
+```{r}
+params <- list(
+  objective = "reg:squarederror", 
+  max_depth = 4,  # Reduce tree depth to prevent overfitting
+  eta = 0.02,      # Lower learning rate for more gradual learning
+  nthread = 4,
+  lambda = 1,      # Increase L2 regularization
+  alpha = 0.5,     # Increase L1 regularization
+  subsample = 0.8, # Use only 80% of data per tree to improve generalization
+  colsample_bytree = 0.8 # Randomly sample features to prevent overfitting
+)
+
+final_model <- xgb.train(params = params, data = dtrain, nrounds = 1000, early_stopping_rounds = 50, watchlist = list(train = dtrain, test = dtest), verbose = 1)
+
+
+```
+
+```{r}
+importance_matrix <- xgb.importance(feature_names = colnames(train_matrix), model = final_model)
+xgb.plot.importance(importance_matrix)
+
+```
+
+```{r}
+cv_results <- xgb.cv(
+  params = params, 
+  data = dtrain, 
+  nrounds = 1000, 
+  nfold = 10, # 5-fold cross-validation
+  early_stopping_rounds = 50, 
+  verbose = 1
+)
+best_nrounds <- cv_results$best_iteration
+final_model <- xgb.train(params = params, data = dtrain, nrounds = best_nrounds)
+
+```
+```{r}
+pred_train <- predict(final_model, newdata = train_matrix)
+rmse_train <- sqrt(mean((pred_train - train_data$Margin)^2))
+
+pred_test <- predict(final_model, newdata = test_matrix)
+rmse_test <- sqrt(mean((pred_test - test_data$Margin)^2))
+
+print(paste("Train RMSE:", rmse_train))
+print(paste("Test RMSE:", rmse_test))
+
+
+```
+
+```{r}
+params <- list(
+  objective = "reg:squarederror", 
+  max_depth = 3,  # Further limit complexity
+  eta = 0.01,      # Even lower learning rate
+  nthread = 4,
+  lambda = 5,      # Stronger L2 regularization
+  alpha = 2,       # Stronger L1 regularization
+  subsample = 0.7, # Less data per tree, reducing overfitting
+  colsample_bytree = 0.7 # Reduce feature selection per tree
+)
+final_model <- xgb.train(params = params, data = dtrain, nrounds = 1000, early_stopping_rounds = 50, watchlist = list(train = dtrain, test = dtest), verbose = 1)
+
+```
+
+```{r}
+pred_train <- predict(final_model, newdata = train_matrix)
+rmse_train <- sqrt(mean((pred_train - train_data$Margin)^2))
+
+pred_test <- predict(final_model, newdata = test_matrix)
+rmse_test <- sqrt(mean((pred_test - test_data$Margin)^2))
+
+print(paste("Train RMSE:", rmse_train))
+print(paste("Test RMSE:", rmse_test))
+
+```
+
+```{r}
+importance_matrix <- xgb.importance(model = final_model)
+print(importance_matrix)
+
+# Select only the top N most important features
+top_features <- importance_matrix$Feature[1:15]  # Keep the top 15 features
+train_matrix <- train_matrix[, top_features, drop=FALSE]
+test_matrix <- test_matrix[, top_features, drop=FALSE]
+
+```
+
+```{r}
+params <- list(
+  objective = "reg:squarederror",
+  max_depth = 4,        # A bit deeper trees
+  eta = 0.02,           # Slightly higher learning rate
+  nthread = 4,
+  lambda = 7,           # Increased L2 regularization
+  alpha = 3,            # Increased L1 regularization
+  subsample = 0.8,      # Higher sample diversity
+  colsample_bytree = 0.8
+)
+final_model <- xgb.train(params = params, data = dtrain, nrounds = 1200, early_stopping_rounds = 50, watchlist = list(train = dtrain, test = dtest), verbose = 1)
+
+```
+```{r}
+rf_pred <- predict(rf_model, newdata = test_data)
+xgb_pred <- predict(final_model, newdata = test_matrix)
+
+# Blend models with equal weighting
+ensemble_pred <- (rf_pred + xgb_pred) / 2
+
+rmse_ensemble <- sqrt(mean((ensemble_pred - test_data$Margin)^2))
+print(paste("Ensemble Test RMSE:", rmse_ensemble))
+
+```
+```{r}
+params <- list(
+  objective = "reg:squarederror",
+  max_depth = 5,        # Increase tree depth for more complexity
+  eta = 0.02,           # Keep learning rate low for stability
+  lambda = 4,           # Reduce L2 regularization
+  alpha = 1,            # Reduce L1 regularization
+  subsample = 0.85,     # Increase data randomness
+  colsample_bytree = 0.85
+)
+
+```
+
+```{r}
+final_model <- xgb.train(
+  params = params, 
+  data = dtrain, 
+  nrounds = 2000, 
+  early_stopping_rounds = 100,   # Stop if no improvement in 100 rounds
+  watchlist = list(train = dtrain, test = dtest),
+  verbose = 1
+)
+
+```
+
+```{r}
+# Get feature importance
+importance_matrix <- xgb.importance(model = final_model)
+# Extract top 20 features
+selected_features <- importance_matrix$Feature[1:20]
+
+# Ensure these features exist in train_matrix
+selected_features <- selected_features[selected_features %in% colnames(train_matrix)]
+
+# Apply selection
+train_matrix <- train_matrix[, selected_features, drop = FALSE]
+test_matrix <- test_matrix[, selected_features, drop = FALSE]
+
+
+print(selected_features)
+
+```
+
+```{r}
+library(dplyr)
+library(xgboost)
+
+# Define the teams and spread
+team_a_id <- 13
+team_b_id <- 29
+new_spread <-   # Spread for the upcoming game
+
+# Filter for past matchups between these two teams
+past_matchups <- nba_data %>%
+  filter((TeamID == team_a_id & OpponentID == team_b_id) | 
+         (TeamID == team_b_id & OpponentID == team_a_id))
+
+# Select the most recent matchup (highest GameID)
+latest_matchup <- past_matchups %>%
+  filter(GameID == max(GameID)) %>%
+  select(DiffSRS, DiffMOV, DiffPL, DiffORtg, DiffDRtg, 
+         DiffSOS, PGDiffFTPerc, DiffNRtg, Spread, DiffPW, 
+         DiffAge, DiffW)
+
+# Ensure feature names match the model's expected features
+colnames(latest_matchup) <- colnames(train_matrix)
+
+# Add missing features with default values (0)
+for (feature in final_model$feature_names) {
+  if (!(feature %in% colnames(latest_matchup))) {
+    latest_matchup[[feature]] <- 0  # Default value
+  }
+}
+
+# Reorder columns to match the model's expected order
+latest_matchup <- latest_matchup[, final_model$feature_names]
+# Convert to XGBoost DMatrix
+latest_matchup_matrix <- xgb.DMatrix(data = as.matrix(latest_matchup))
+
+# Predict the margin
+predicted_margin <- predict(final_model, newdata = latest_matchup_matrix)
+
+# Print result
+print(paste("Predicted Margin (Home - Away):", predicted_margin))
+
+
+
+
+```
+
+
+
