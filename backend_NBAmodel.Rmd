@@ -9,6 +9,16 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+```{r}
+install.packages("dplyr")
+install.packages("caret")
+install.packages("readxl")
+install.packages("randomForest")
+install.packages("xgboost")
+install.packages("Matrix")
+install.packages("ggplot2")
+
+```
 
 
 ```{r}
@@ -143,7 +153,7 @@ library(ggplot2)
 
 ```{r}
 # Drop TeamID and retrain
-data <- your_dataframe %>% select(-c(GameID, Team, Opponent, TeamID)) 
+data <- nba_data %>% select(-c(GameID, TeamID, OpponentID)) 
 
 # Train/Test Split
 set.seed(42)
@@ -504,5 +514,709 @@ print(paste("Predicted Margin (Home - Away):", predicted_margin))
 
 ```
 
+```{r}
+library(caret)
+library(xgboost)
 
+# Define the search grid for hyperparameters
+tune_grid <- expand.grid(
+  nrounds = c(100, 250, 500),  # Number of boosting rounds
+  eta = c(0.01, 0.05, 0.1),  # Learning rate
+  max_depth = c(3, 5, 7),  # Tree depth
+  gamma = c(0, 1, 5),  # Minimum loss reduction
+  colsample_bytree = c(0.6, 0.8, 1),  # Feature selection per tree
+  subsample = c(0.6, 0.8, 1),  # Row selection per tree
+  min_child_weight = c(1, 3, 5)  # Minimum child node weight
+)
+
+# Train the model with hyperparameter tuning
+train_control <- trainControl(method = "cv", number = 5, verboseIter = TRUE)
+
+xgb_tuned <- train(
+  x = as.matrix(train_data[, -which(names(train_data) == "Margin")]), 
+  y = train_data$Margin, 
+  method = "xgbTree", 
+  trControl = train_control, 
+  tuneGrid = tune_grid
+)
+
+# Best parameters
+print(xgb_tuned$bestTune)
+
+```
+
+
+```{r}
+# Define the best parameters from tuning
+# Assuming xgb_tuned is the result of a tuning process (e.g., using caret or tidymodels)
+# Example: xgb_tuned <- train(...)
+
+# Define the best hyperparameters (replace with actual values from tuning)
+xgb_tuned <- list(
+  bestTune = data.frame(
+    nrounds = 250,
+    max_depth = 3,
+    eta = 0.01,
+    gamma = 5,
+    colsample_bytree = 0.6,
+    min_child_weight = 1,
+    subsample = 0.8
+  )
+)
+
+# Extract the best hyperparameters
+params <- list(
+  objective = "reg:squarederror",  # Regression task
+  max_depth = xgb_tuned$bestTune$max_depth,
+  eta = xgb_tuned$bestTune$eta,
+  gamma = xgb_tuned$bestTune$gamma,
+  colsample_bytree = xgb_tuned$bestTune$colsample_bytree,
+  subsample = xgb_tuned$bestTune$subsample,
+  min_child_weight = xgb_tuned$bestTune$min_child_weight,
+  lambda = 10,  # L2 Regularization
+  alpha = 5  # L1 Regularization
+)
+
+# Print the parameters to verify
+print(params)
+
+# Convert to XGBoost matrix format
+train_matrix <- xgb.DMatrix(data = as.matrix(train_data[, -which(names(train_data) == "Margin")]), label = train_data$Margin)
+test_matrix <- xgb.DMatrix(data = as.matrix(test_data[, -which(names(test_data) == "Margin")]), label = test_data$Margin)
+
+# Train the final model
+final_model <- xgb.train(params = params, data = train_matrix, nrounds = 1000, early_stopping_rounds = 50, watchlist = list(train = train_matrix, test = test_matrix), verbose = 1)
+
+# Print final RMSE
+pred_test <- predict(final_model, newdata = test_matrix)
+rmse_test <- sqrt(mean((pred_test - test_data$Margin)^2))
+print(paste("Final Test RMSE:", rmse_test))
+
+
+```
+
+```{r}
+params <- list(
+  objective = "reg:squarederror",
+  max_depth = xgb_tuned$bestTune$max_depth,
+  eta = xgb_tuned$bestTune$eta,
+  gamma = xgb_tuned$bestTune$gamma,
+  colsample_bytree = xgb_tuned$bestTune$colsample_bytree,
+  subsample = xgb_tuned$bestTune$subsample,
+  min_child_weight = xgb_tuned$bestTune$min_child_weight,
+  lambda = 5,  # Lower L2 Regularization (was 10)
+  alpha = 2  # Lower L1 Regularization (was 5)
+)
+
+```
+
+```{r}
+# Get top 20 important features
+importance_matrix <- xgb.importance(model = final_model)
+top_features <- importance_matrix$Feature[1:20]  
+
+# Subset the train and test data **before converting to xgb.DMatrix**
+train_data_filtered <- train_data[, c(top_features, "Margin"), drop = FALSE]
+test_data_filtered <- test_data[, c(top_features, "Margin"), drop = FALSE]
+
+# Convert to xgb.DMatrix
+train_matrix <- xgb.DMatrix(data = as.matrix(train_data_filtered[, -which(names(train_data_filtered) == "Margin")]), 
+                            label = train_data_filtered$Margin)
+
+test_matrix <- xgb.DMatrix(data = as.matrix(test_data_filtered[, -which(names(test_data_filtered) == "Margin")]), 
+                           label = test_data_filtered$Margin)
+
+
+```
+
+```{r}
+final_model <- xgb.train(
+  params = params, 
+  data = train_matrix, 
+  nrounds = 2000,  # Increase rounds (was 1000)
+  early_stopping_rounds = 100,  # Allow more training
+  watchlist = list(train = train_matrix, test = test_matrix), 
+  verbose = 1
+)
+
+```
+```{r}
+# Get top 50 important features instead of 20
+top_features <- importance_matrix$Feature[1:50]  
+
+# Subset the train and test data
+train_data_filtered <- train_data[, c(top_features, "Margin"), drop = FALSE]
+test_data_filtered <- test_data[, c(top_features, "Margin"), drop = FALSE]
+
+```
+
+```{r}
+params <- list(
+  objective = "reg:squarederror",
+  max_depth = 6,  # Keep tree complexity reasonable
+  eta = 0.05,  # Slightly higher learning rate
+  gamma = 1,  # Regularization for split gain
+  colsample_bytree = 0.8,  
+  subsample = 0.8,  
+  min_child_weight = 3,  
+  lambda = 3,  # Reduced L2 regularization
+  alpha = 1  # Reduced L1 regularization
+)
+
+```
+
+```{r}
+train_data_filtered <- train_data_filtered %>%
+  mutate(
+    MOV_x_DRtg = DiffMOV * DiffDRtg,
+    ORtg_x_DRtg = DiffORtg * DiffDRtg,
+  )
+
+```
+```{r}
+final_model <- xgb.train(
+  params = params, 
+  data = train_matrix, 
+  nrounds = 2000,  # More rounds to improve learning
+  early_stopping_rounds = 100,  
+  watchlist = list(train = train_matrix, test = test_matrix), 
+  verbose = 1
+)
+
+```
+
+```{r}
+# Linear Model Without Interaction Terms
+lm_simple <- lm(Margin ~ ., data = train_data)
+r2_simple <- summary(lm_simple)$r.squared
+rmse_simple <- sqrt(mean(lm_simple$residuals^2))
+
+# Linear Model With Interaction Terms
+lm_interactions <- lm(Margin ~ . + .^2, data = train_data)  # Adds interactions
+r2_interactions <- summary(lm_interactions)$r.squared
+rmse_interactions <- sqrt(mean(lm_interactions$residuals^2))
+
+# Print results
+print(paste("R² Without Interactions:", r2_simple))
+print(paste("R² With Interactions:", r2_interactions))
+print(paste("RMSE Without Interactions:", rmse_simple))
+print(paste("RMSE With Interactions:", rmse_interactions))
+
+```
+```{r}
+# Create interaction terms in training data
+train_data_interactions <- train_data %>%
+  mutate(
+    MOV_x_DRtg = DiffMOV * DiffDRtg,
+    ORtg_x_DRtg = DiffORtg * DiffDRtg,
+    MOV_x_3PAr = DiffMOV * Diff3PAr,
+    ORtg_x_TS = DiffORtg * DiffTS,
+    DRtg_x_Pace = DiffDRtg * DiffPace
+  )
+
+# Apply the same transformations to test data
+test_data_interactions <- test_data %>%
+  mutate(
+    MOV_x_DRtg = DiffMOV * DiffDRtg,
+    ORtg_x_DRtg = DiffORtg * DiffDRtg,
+    MOV_x_3PAr = DiffMOV * Diff3PAr,
+    ORtg_x_TS = DiffORtg * DiffTS,
+    DRtg_x_Pace = DiffDRtg * DiffPace
+  )
+
+```
+
+```{r}
+library(xgboost)
+
+# Convert to xgb.DMatrix
+train_matrix_interactions <- xgb.DMatrix(data = as.matrix(train_data_interactions[, -which(names(train_data_interactions) == "Margin")]), 
+                                         label = train_data_interactions$Margin)
+
+test_matrix_interactions <- xgb.DMatrix(data = as.matrix(test_data_interactions[, -which(names(test_data_interactions) == "Margin")]), 
+                                        label = test_data_interactions$Margin)
+
+# Define XGBoost parameters
+params_interactions <- list(
+  objective = "reg:squarederror",
+  max_depth = 5,  
+  eta = 0.05,  
+  gamma = 1,  
+  colsample_bytree = 0.8,  
+  subsample = 0.8,  
+  min_child_weight = 3,  
+  lambda = 5,  
+  alpha = 2  
+)
+
+# Train the final XGBoost model with interaction terms
+final_model_interactions <- xgb.train(
+  params = params_interactions, 
+  data = train_matrix_interactions, 
+  nrounds = 1000,  
+  early_stopping_rounds = 50,  
+  watchlist = list(train = train_matrix_interactions, test = test_matrix_interactions), 
+  verbose = 1
+)
+
+# Predict and Evaluate RMSE
+pred_test_interactions <- predict(final_model_interactions, newdata = test_matrix_interactions)
+rmse_test_interactions <- sqrt(mean((pred_test_interactions - test_data_interactions$Margin)^2))
+print(paste("Final Test RMSE with Interaction Terms in XGBoost:", rmse_test_interactions))
+
+```
+```{r}
+# Normalize training and test data
+normalize <- function(x) {
+  return((x - min(x, na.rm=TRUE)) / (max(x, na.rm=TRUE) - min(x, na.rm=TRUE)))
+}
+
+train_data_scaled <- as.data.frame(lapply(train_data_interactions, normalize))
+test_data_scaled <- as.data.frame(lapply(test_data_interactions, normalize))
+
+```
+
+```{r}
+params_interactions <- list(
+  objective = "reg:squarederror",
+  max_depth = 8,  # Increased from 7 to 8 for more learning
+  eta = 0.03,  # Lowered learning rate for smoother updates
+  gamma = 0.5,  # Reduced regularization on splits
+  colsample_bytree = 0.9,  # Use more features per tree
+  subsample = 0.9,  # Use more samples per tree
+  min_child_weight = 2,  # Allow smaller splits
+  lambda = 2,  # Reduced L2 regularization
+  alpha = 1  # Reduced L1 regularization
+)
+
+```
+
+```{r}
+# Convert to xgb.DMatrix
+train_matrix_interactions <- xgb.DMatrix(data = as.matrix(train_data_scaled[, -which(names(train_data_scaled) == "Margin")]), 
+                                         label = train_data_scaled$Margin)
+
+test_matrix_interactions <- xgb.DMatrix(data = as.matrix(test_data_scaled[, -which(names(test_data_scaled) == "Margin")]), 
+                                        label = test_data_scaled$Margin)
+
+# Train model
+final_model_interactions <- xgb.train(
+  params = params_interactions, 
+  data = train_matrix_interactions, 
+  nrounds = 3000,  # Increased rounds for deeper learning
+  early_stopping_rounds = 75,  # Allow model to find best stopping point
+  watchlist = list(train = train_matrix_interactions, test = test_matrix_interactions), 
+  verbose = 1
+)
+
+# Predict and Evaluate RMSE
+pred_test_interactions <- predict(final_model_interactions, newdata = test_matrix_interactions)
+rmse_test_interactions <- sqrt(mean((pred_test_interactions - test_data_scaled$Margin)^2))
+print(paste("Final Test RMSE with Normalization & Tuning:", rmse_test_interactions))
+
+```
+```{r}
+# Check RMSE on a new unseen dataset (cross-validation)
+cv_results <- xgb.cv(
+  params = params_interactions, 
+  data = train_matrix_interactions, 
+  nrounds = 3000,  
+  nfold = 5,  # 5-fold cross-validation
+  early_stopping_rounds = 50,  
+  verbose = 1
+)
+
+# Print cross-validation RMSE
+print(paste("Cross-Validation RMSE:", min(cv_results$evaluation_log$test_rmse_mean)))
+
+```
+```{r}
+# Check if test data was scaled using train min/max
+print(summary(train_data_scaled))
+print(summary(test_data_scaled))
+
+```
+```{r}
+params_interactions <- list(
+  objective = "reg:squarederror",
+  max_depth = 4,  # Reduce complexity
+  eta = 0.02,  # Lower learning rate for smoother learning
+  gamma = 5,  # Require more gain to split nodes
+  colsample_bytree = 0.6,  # Use fewer features per tree
+  subsample = 0.6,  # Use fewer samples per tree (helps generalization)
+  min_child_weight = 10,  # Require larger leaf nodes
+  lambda = 15,  # Increase L2 regularization to penalize large coefficients
+  alpha = 10  # Increase L1 regularization to remove less useful variables
+)
+
+```
+
+```{r}
+final_model_interactions <- xgb.train(
+  params = params_interactions, 
+  data = train_matrix_interactions, 
+  nrounds = 500,  # Reduce from 3000 to prevent overfitting
+  early_stopping_rounds = 25,  # Stop earlier to prevent memorization
+  watchlist = list(train = train_matrix_interactions, test = test_matrix_interactions), 
+  verbose = 1
+)
+
+```
+
+```{r}
+# Normalize train and test separately
+normalize <- function(x, train_min, train_max) {
+  return((x - train_min) / (train_max - train_min))
+}
+
+# Compute train min/max only from training data
+train_min <- apply(train_data_interactions, 2, min, na.rm=TRUE)
+train_max <- apply(train_data_interactions, 2, max, na.rm=TRUE)
+
+# Apply normalization separately to train and test
+train_data_scaled <- as.data.frame(mapply(normalize, train_data_interactions, train_min, train_max))
+test_data_scaled <- as.data.frame(mapply(normalize, test_data_interactions, train_min, train_max))
+
+```
+
+```{r}
+print(summary(train_data$Margin))
+print(summary(test_data$Margin))
+```
+```{r}
+# Reverse scaling: Convert RMSE back to actual score range
+actual_rmse <- rmse_test_interactions * (max(train_data$Margin) - min(train_data$Margin))
+print(paste("Actual RMSE (Unscaled):", actual_rmse))
+
+```
+
+```{r}
+# Convert train & test sets back to unscaled Margin
+train_matrix_unscaled <- xgb.DMatrix(data = as.matrix(train_data_interactions[, -which(names(train_data_interactions) == "Margin")]), 
+                                     label = train_data_interactions$Margin)
+
+test_matrix_unscaled <- xgb.DMatrix(data = as.matrix(test_data_interactions[, -which(names(test_data_interactions) == "Margin")]), 
+                                    label = test_data_interactions$Margin)
+
+# Retrain XGBoost without scaling Margin
+final_model_unscaled <- xgb.train(
+  params = params_interactions, 
+  data = train_matrix_unscaled, 
+  nrounds = 500,  
+  early_stopping_rounds = 25,  
+  watchlist = list(train = train_matrix_unscaled, test = test_matrix_unscaled), 
+  verbose = 1
+)
+
+# Predict and evaluate RMSE on original scale
+pred_test_unscaled <- predict(final_model_unscaled, newdata = test_matrix_unscaled)
+rmse_test_unscaled <- sqrt(mean((pred_test_unscaled - test_data_interactions$Margin)^2))
+print(paste("Final Test RMSE (Unscaled):", rmse_test_unscaled))
+
+```
+```{r}
+library(xgboost)
+
+params_optimized <- list(
+  objective = "reg:squarederror",
+  max_depth = 6,  # Reduce depth for less overfitting
+  eta = 0.025,  # Lower learning rate for stability
+  gamma = 3,  # Increase split regularization
+  colsample_bytree = 0.7,  # Use fewer features per tree
+  subsample = 0.7,  # Use fewer samples per tree (better generalization)
+  min_child_weight = 6,  # Require larger node size
+  lambda = 10,  # L2 regularization (prevents overfitting)
+  alpha = 5  # L1 regularization (forces sparsity)
+)
+
+final_model_optimized <- xgb.train(
+  params = params_optimized, 
+  data = train_matrix_unscaled, 
+  nrounds = 750,  # More boosting rounds
+  early_stopping_rounds = 50,  # Stop early if no improvement
+  watchlist = list(train = train_matrix_unscaled, test = test_matrix_unscaled), 
+  verbose = 1
+)
+
+# Predict and Evaluate RMSE
+pred_test_optimized <- predict(final_model_optimized, newdata = test_matrix_unscaled)
+rmse_test_optimized <- sqrt(mean((pred_test_optimized - test_data_interactions$Margin)^2))
+print(paste("Final Test RMSE After Optimization:", rmse_test_optimized))
+
+```
+
+
+```{r}
+# Get feature importance
+importance_matrix <- xgb.importance(model = final_model_optimized)
+
+# Print top 20 features
+print(importance_matrix[1:20, ])
+
+# Select only top 30 features
+top_features <- importance_matrix$Feature[1:30]
+
+# Subset train and test data to keep only important features
+train_data_filtered <- train_data_interactions[, c(top_features, "Margin"), drop = FALSE]
+test_data_filtered <- test_data_interactions[, c(top_features, "Margin"), drop = FALSE]
+
+```
+
+```{r}
+params_optimized <- list(
+  objective = "reg:squarederror",
+  max_depth = 5,  # Reduce depth to prevent overfitting
+  eta = 0.02,  # Lower learning rate for more stability
+  gamma = 4,  # Increase split regularization
+  colsample_bytree = 0.8,  # Use 80% of features per tree
+  subsample = 0.8,  # Use 80% of samples per tree
+  min_child_weight = 7,  # Require larger leaf nodes
+  lambda = 12,  # Adjust L2 regularization
+  alpha = 6  # Adjust L1 regularization
+)
+
+```
+
+```{r}
+# Convert to xgb.DMatrix
+train_matrix_filtered <- xgb.DMatrix(data = as.matrix(train_data_filtered[, -which(names(train_data_filtered) == "Margin")]), 
+                                     label = train_data_filtered$Margin)
+
+test_matrix_filtered <- xgb.DMatrix(data = as.matrix(test_data_filtered[, -which(names(test_data_filtered) == "Margin")]), 
+                                    label = test_data_filtered$Margin)
+
+# Train XGBoost Model
+final_model_refined <- xgb.train(
+  params = params_optimized, 
+  data = train_matrix_filtered, 
+  nrounds = 750,  
+  early_stopping_rounds = 50,  
+  watchlist = list(train = train_matrix_filtered, test = test_matrix_filtered), 
+  verbose = 1
+)
+
+# Predict and Evaluate RMSE
+pred_test_refined <- predict(final_model_refined, newdata = test_matrix_filtered)
+rmse_test_refined <- sqrt(mean((pred_test_refined - test_data_filtered$Margin)^2))
+print(paste("Final Test RMSE After Refinement:", rmse_test_refined))
+
+```
+
+```{r}
+params_refined <- list(
+  objective = "reg:squarederror",
+  max_depth = 4,  # Reduce from 5 to prevent overfitting
+  eta = 0.02,  
+  gamma = 5,  
+  colsample_bytree = 0.8,  
+  subsample = 0.8,  
+  min_child_weight = 8,  
+  lambda = 15,  
+  alpha = 8  
+)
+
+# Convert to xgb.DMatrix
+train_matrix_final <- xgb.DMatrix(data = as.matrix(train_data_filtered[, -which(names(train_data_filtered) == "Margin")]), 
+                                  label = train_data_filtered$Margin)
+
+test_matrix_final <- xgb.DMatrix(data = as.matrix(test_data_filtered[, -which(names(test_data_filtered) == "Margin")]), 
+                                 label = test_data_filtered$Margin)
+
+# Train the refined model
+final_model_final <- xgb.train(
+  params = params_refined, 
+  data = train_matrix_final, 
+  nrounds = 1000,  # More boosting rounds to refine predictions
+  early_stopping_rounds = 50,  
+  watchlist = list(train = train_matrix_final, test = test_matrix_final), 
+  verbose = 1
+)
+
+# Predict and Evaluate RMSE
+pred_test_final <- predict(final_model_final, newdata = test_matrix_final)
+rmse_test_final <- sqrt(mean((pred_test_final - test_data_filtered$Margin)^2))
+print(paste("Final Test RMSE with Rest Days & Tuning:", rmse_test_final))
+
+```
+
+
+```{r}
+train_data_filtered <- train_data_filtered %>%
+  mutate(
+    MOV_x_DRtg = DiffMOV * DiffDRtg,
+    ORtg_x_DRtg = DiffORtg * DiffDRtg,
+  )
+
+test_data_filtered <- test_data_filtered %>%
+  mutate(
+    MOV_x_DRtg = DiffMOV * DiffDRtg,
+    ORtg_x_DRtg = DiffORtg * DiffDRtg,
+  )
+params_optimized <- list(
+  objective = "reg:squarederror",
+  max_depth = 4,  
+  eta = 0.018,  # Reduce learning rate slightly for more precise learning
+  gamma = 4.5,  
+  colsample_bytree = 0.75,  
+  subsample = 0.75,  
+  min_child_weight = 9,  
+  lambda = 12,  # Adjust L2
+  alpha = 7  # Adjust L1
+)
+# Convert to xgb.DMatrix
+train_matrix_final <- xgb.DMatrix(data = as.matrix(train_data_filtered[, -which(names(train_data_filtered) == "Margin")]), 
+                                  label = train_data_filtered$Margin)
+
+test_matrix_final <- xgb.DMatrix(data = as.matrix(test_data_filtered[, -which(names(test_data_filtered) == "Margin")]), 
+                                 label = test_data_filtered$Margin)
+
+# Train the refined model
+final_model_final <- xgb.train(
+  params = params_optimized, 
+  data = train_matrix_final, 
+  nrounds = 1200,  # Slightly more rounds for better learning
+  early_stopping_rounds = 60,  
+  watchlist = list(train = train_matrix_final, test = test_matrix_final), 
+  verbose = 1
+)
+
+# Predict and Evaluate RMSE
+pred_test_final <- predict(final_model_final, newdata = test_matrix_final)
+rmse_test_final <- sqrt(mean((pred_test_final - test_data_filtered$Margin)^2))
+print(paste("Final Test RMSE with Interaction Terms & Tuning:", rmse_test_final))
+
+```
+
+```{r}
+train_data_filtered <- train_data_filtered %>%
+  mutate(
+    MOV_x_DRtg = DiffMOV * DiffDRtg,
+    ORtg_x_DRtg = DiffORtg * DiffDRtg,
+  )
+
+test_data_filtered <- test_data_filtered %>%
+  mutate(
+    MOV_x_DRtg = DiffMOV * DiffDRtg,
+    ORtg_x_DRtg = DiffORtg * DiffDRtg,
+  )
+params_tuned <- list(
+  objective = "reg:squarederror",
+  max_depth = 5,  # Slightly increase depth for learning
+  eta = 0.03,  # Increase learning rate to speed up convergence
+  gamma = 3,  # Reduce split regularization to allow more splits
+  colsample_bytree = 0.8,  
+  subsample = 0.8,  
+  min_child_weight = 6,  # Allow smaller leaves
+  lambda = 8,  # Reduce L2 penalty
+  alpha = 4  # Reduce L1 penalty
+)
+# Convert to xgb.DMatrix
+train_matrix_final <- xgb.DMatrix(data = as.matrix(train_data_filtered[, -which(names(train_data_filtered) == "Margin")]), 
+                                  label = train_data_filtered$Margin)
+
+test_matrix_final <- xgb.DMatrix(data = as.matrix(test_data_filtered[, -which(names(test_data_filtered) == "Margin")]), 
+                                 label = test_data_filtered$Margin)
+
+# Train the refined model
+final_model_final <- xgb.train(
+  params = params_tuned, 
+  data = train_matrix_final, 
+  nrounds = 1000,  
+  early_stopping_rounds = 50,  
+  watchlist = list(train = train_matrix_final, test = test_matrix_final), 
+  verbose = 1
+)
+
+# Predict and Evaluate RMSE
+pred_test_final <- predict(final_model_final, newdata = test_matrix_final)
+rmse_test_final <- sqrt(mean((pred_test_final - test_data_filtered$Margin)^2))
+print(paste("Final Test RMSE After Removing Noise:", rmse_test_final))
+
+```
+
+
+```{r}
+install.packages(c('data.table', 'jsonlite'))
+# Install XGBoost
+R CMD INSTALL ./xgboost_r_gpu_linux.tar.gz
+```
+
+
+
+
+```{r}
+library(xgboost)
+
+# Check if GPU functions exist
+exists("xgb.build.info")  # Should return `TRUE`
+exists("xgb.gpu.check")  
+xgb.build.info()$build_type  # Should return "GPU"
+
+
+# Use the original dataset with all features
+train_data_full <- train_data_interactions  
+test_data_full <- test_data_interactions  
+library(caret)
+
+# Define search grid for XGBoost tuning
+tune_grid <- expand.grid(
+  nrounds = c(500, 1000, 1500),  # Number of boosting rounds
+  eta = c(0.01, 0.03, 0.05),  # Learning rate
+  max_depth = c(4, 6, 8),  # Tree depth
+  gamma = c(0, 1, 3),  # Min loss reduction
+  colsample_bytree = c(0.7, 0.8, 0.9),  
+  subsample = c(0.7, 0.8, 0.9),  
+  min_child_weight = c(1, 3, 5)  
+)
+
+# Define training control
+train_control <- trainControl(method = "cv", number = 5, verboseIter = TRUE)
+
+# Train model with hyperparameter search
+xgb_tuned <- train(
+  x = as.matrix(train_data_full[, -which(names(train_data_full) == "Margin")]), 
+  y = train_data_full$Margin, 
+  method = "xgbTree", 
+  trControl = train_control, 
+  tuneGrid = tune_grid
+)
+
+# Print best hyperparameters
+print(xgb_tuned$bestTune)
+
+
+# Get best hyperparameters from tuning
+params_optimized <- list(
+  objective = "reg:squarederror",
+  max_depth = xgb_tuned$bestTune$max_depth,
+  eta = xgb_tuned$bestTune$eta,
+  gamma = xgb_tuned$bestTune$gamma,
+  colsample_bytree = xgb_tuned$bestTune$colsample_bytree,
+  subsample = xgb_tuned$bestTune$subsample,
+  min_child_weight = xgb_tuned$bestTune$min_child_weight
+)
+
+# Convert to xgb.DMatrix
+train_matrix_full <- xgb.DMatrix(data = as.matrix(train_data_full[, -which(names(train_data_full) == "Margin")]), 
+                                  label = train_data_full$Margin)
+
+test_matrix_full <- xgb.DMatrix(data = as.matrix(test_data_full[, -which(names(test_data_full) == "Margin")]), 
+                                 label = test_data_full$Margin)
+
+# Train final XGBoost model
+final_model_tuned <- xgb.train(
+  params = params_optimized, 
+  data = train_matrix_full, 
+  nrounds = xgb_tuned$bestTune$nrounds,  
+  early_stopping_rounds = 50,  
+  watchlist = list(train = train_matrix_full, test = test_matrix_full), 
+  verbose = 1
+)
+
+# Predict and Evaluate RMSE
+pred_test_tuned <- predict(final_model_tuned, newdata = test_matrix_full)
+rmse_test_tuned <- sqrt(mean((pred_test_tuned - test_data_full$Margin)^2))
+print(paste("Final Test RMSE After Auto-Tuning:", rmse_test_tuned))
+
+```
 

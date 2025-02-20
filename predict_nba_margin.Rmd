@@ -17,6 +17,11 @@ library(xgboost)
 # Function to Predict Margin for an Upcoming Game
 predict_nba_margin <- function(team_a_id, team_b_id, new_spread) {
   
+  # Ensure TeamID & OpponentID exist in nba_data
+  if (!("TeamID" %in% colnames(nba_data)) || !("OpponentID" %in% colnames(nba_data))) {
+    stop("❌ 'TeamID' or 'OpponentID' columns are missing in nba_data!")
+  }
+  
   # Filter for past matchups between these two teams
   past_matchups <- nba_data %>%
     filter((TeamID == team_a_id & OpponentID == team_b_id) | 
@@ -30,48 +35,151 @@ predict_nba_margin <- function(team_a_id, team_b_id, new_spread) {
   # Select the most recent matchup (highest GameID)
   latest_matchup <- past_matchups %>%
     filter(GameID == max(GameID)) %>%
-    select(DiffSRS, DiffMOV, DiffPL, DiffORtg, DiffDRtg, 
-           DiffSOS, PGDiffFTPerc, DiffNRtg, Spread, DiffPW, 
-           DiffAge, DiffW)
+    select(-GameID, -TeamID, -OpponentID, -Margin)  # Remove non-feature columns
   
   # Ensure feature names match the model's expected features
   colnames(latest_matchup) <- colnames(train_matrix)
   
   # Add missing features with default values (0)
-  for (feature in final_model$feature_names) {
+  for (feature in final_model_final$feature_names) {
     if (!(feature %in% colnames(latest_matchup))) {
-      latest_matchup[[feature]] <- 0  # Default value
+      latest_matchup[[feature]] <- 0  
     }
   }
   
   # Reorder columns to match the model's expected order
-  latest_matchup <- latest_matchup[, final_model$feature_names]
+  latest_matchup <- latest_matchup[, final_model_final$feature_names]
   
   # Convert to XGBoost DMatrix
   latest_matchup_matrix <- xgb.DMatrix(data = as.matrix(latest_matchup))
   
   # Predict the margin
-  predicted_margin <- predict(final_model, newdata = latest_matchup_matrix)
+  predicted_margin <- predict(final_model_final, newdata = latest_matchup_matrix)
   
   # Print result
-  print(paste("Predicted Margin (Home - Away):", predicted_margin))
+  print(paste("🏀 Predicted Margin (Home - Away):", round(predicted_margin, 2)))
   
   # Compare against spread
   spread_difference <- predicted_margin - new_spread
-  print(paste("Difference Between Prediction and Spread:", spread_difference))
+  print(paste("📊 Difference Between Prediction and Spread:", round(spread_difference, 2)))
   
   return(list(predicted_margin = predicted_margin, spread_difference = spread_difference))
+}
+
+```
+
+```{r}
+predict_nba_margin(team_a_id = 2, team_b_id = 23, new_spread = -7)
+
+```
+
+
+```{r}
+# Initialize an empty data frame for tracking predictions
+model_results <- data.frame(
+  GameID = integer(),
+  TeamA_ID = integer(),
+  TeamB_ID = integer(),
+  Spread = numeric(),
+  Predicted_Margin = numeric(),
+  Actual_Margin = numeric(),
+  Correct_Prediction = logical(),
+  Beat_Spread = logical()
+)
+add_prediction <- function(game_id, team_a, team_b, spread, predicted_margin) {
+  
+  # Check if the game already exists
+  if (game_id %in% model_results$GameID) {
+    print("❌ Game already exists in model_results! Use update_result() to add actual margin.")
+    return()
+  }
+  
+  # Add the new prediction
+  new_game <- data.frame(
+    GameID = game_id,
+    TeamA_ID = team_a,
+    TeamB_ID = team_b,
+    Spread = spread,
+    Predicted_Margin = predicted_margin,
+    Actual_Margin = NA,  # Placeholder until updated
+    Correct_Prediction = NA,
+    Beat_Spread = NA
+  )
+  
+  # Append to global model_results
+  model_results <<- rbind(model_results, new_game)
+  
+  print("✅ Prediction added successfully!")
+}
+update_result <- function(game_id, actual_margin) {
+  
+  # Find the game in the data frame
+  row_index <- which(model_results$GameID == game_id)
+  
+  if (length(row_index) == 0) {
+    print("❌ Game ID not found! Add prediction first using add_prediction().")
+    return()
+  }
+  
+  # Update actual margin
+  model_results$Actual_Margin[row_index] <<- actual_margin
+  
+  # Check if the prediction was correct (sign of margin matches)
+  model_results$Correct_Prediction[row_index] <<- 
+    sign(model_results$Predicted_Margin[row_index]) == sign(actual_margin)
+  
+  # Check if the predicted margin covered the spread
+  model_results$Beat_Spread[row_index] <<- 
+    sign(model_results$Predicted_Margin[row_index] - model_results$Spread[row_index]) == sign(actual_margin - model_results$Spread[row_index])
+  
+  print("✅ Game result updated successfully!")
+}
+track_performance <- function() {
+  
+  # Ensure 'Correct_Prediction' is not NA before counting
+  model_results_clean <- model_results[!is.na(model_results$Correct_Prediction), ]
+  
+  total_games <- nrow(model_results_clean)
+  wins <- sum(model_results_clean$Correct_Prediction, na.rm = TRUE)
+  losses <- total_games - wins
+  win_percentage <- ifelse(total_games > 0, round((wins / total_games) * 100, 2), 0)
+  
+  # Track spread performance
+  spread_wins <- sum(model_results_clean$Beat_Spread, na.rm = TRUE)
+  spread_losses <- total_games - spread_wins
+  spread_win_percentage <- ifelse(total_games > 0, round((spread_wins / total_games) * 100, 2), 0)
+  
+  # Print performance results
+  print(paste("🏀 Total Games Tracked:", total_games))
+  print(paste("✅ Correct Predictions:", wins, "| ❌ Incorrect Predictions:", losses))
+  print(paste("📊 Model Accuracy:", win_percentage, "%"))
+  print(paste("💰 Beat Spread:", spread_wins, "| ❌ Did Not Beat Spread:", spread_losses))
+  print(paste("📈 Spread Win Percentage:", spread_win_percentage, "%"))
+  
+  return(data.frame(
+    Total_Games = total_games,
+    Wins = wins,
+    Losses = losses,
+    Win_Percentage = paste0(win_percentage, "%"),
+    Spread_Wins = spread_wins,
+    Spread_Losses = spread_losses,
+    Spread_Win_Percentage = paste0(spread_win_percentage, "%")
+  ))
 }
 
 
 
 
 
+
 ```
-
-
 
 ```{r}
-predict_nba_margin(team_a_id = 10, team_b_id = 11, new_spread = 0)
+add_prediction(game_id = 816, team_a = 4, team_b = 14, spread = 13, predicted_margin = 2.69)
+update_result(game_id = 816, actual_margin = 3)
+track_performance()
+
+print(model_results)
 ```
+
 
