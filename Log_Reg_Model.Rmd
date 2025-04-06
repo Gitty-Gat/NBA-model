@@ -1,0 +1,674 @@
+---
+title: "Untitled"
+author: "Sean Slattery"
+date: "2025-03-31"
+output: html_document
+---
+
+
+```{r}
+# Install necessary packages (if not already installed)
+install_if_missing <- function(pkg) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg)
+  }
+}
+  
+packages <- c("dplyr", "ggplot2", "caret", "e1071", "randomForest", "xgboost", 
+              "class", "kernlab", "pROC", "tidyverse", "data.table","readxl")
+
+lapply(packages, install_if_missing)
+
+# Load libraries
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(e1071)
+library(randomForest)
+library(xgboost)
+library(class)
+library(kernlab)
+library(pROC)
+library(tidyverse)
+library(data.table)
+library(readxl)
+
+```
+
+```{r}
+data <- read_excel("C:\\Users\\seani\\OneDrive - University of Illinois - Urbana\\Desktop\\BettingModel\\BettingModel\\NBA_raw.xlsx")
+```
+
+
+
+```{r}
+# Initialize ELO ratings
+initialize_elo <- function(teams) {
+  elo_ratings <- rep(1500, length(teams))
+  names(elo_ratings) <- teams
+  return(elo_ratings)
+}
+
+# Calculate the expected win probability
+expected_win_prob <- function(elo_A, elo_B) {
+  return(1 / (1 + 10^((elo_B - elo_A) / 400)))
+}
+
+# Update ELO ratings after a game
+update_elo <- function(elo_A, elo_B, actual_A, K) {
+  expected_A <- expected_win_prob(elo_A, elo_B)
+  new_elo_A <- elo_A + K * (actual_A - expected_A)
+  new_elo_B <- elo_B + K * ((1 - actual_A) - (1 - expected_A))
+  return(c(new_elo_A, new_elo_B))
+}
+
+# Function to update ELO ratings over all games
+compute_elo_ratings <- function(data, K = 20) {
+  teams <- unique(c(data$Home, data$Away))
+  elo_ratings <- initialize_elo(teams)
+  
+  data <- data %>%
+    arrange(GameID) %>%  # Ensure chronological order
+    mutate(Home_ELO = NA, Away_ELO = NA)
+  
+  for (i in 1:nrow(data)) {
+    home_team <- data$Home[i]
+    away_team <- data$Away[i]
+    
+    # Assign current ELOs
+    data$Home_ELO[i] <- elo_ratings[home_team]
+    data$Away_ELO[i] <- elo_ratings[away_team]
+    
+    # Game result (1 if home team wins, 0 otherwise)
+    actual_A <- ifelse(data$Margin[i] > 0, 1, 0)
+    
+    # Update ELOs
+    new_elos <- update_elo(elo_ratings[home_team], elo_ratings[away_team], actual_A, K)
+    elo_ratings[home_team] <- new_elos[1]
+    elo_ratings[away_team] <- new_elos[2]
+  }
+  
+  return(data)
+}
+
+# Apply ELO calculation
+data <- compute_elo_ratings(data)
+
+```
+
+```{r}
+# Create additional predictive features
+prepare_features <- function(data) {
+  data <- data %>%
+    mutate(ELO_Diff = Home_ELO - Away_ELO,  # ELO difference
+           FG_Diff = Home_FG - Away_FG,      # Field Goal difference
+           AST_Diff = Home_AST - Away_AST,  # Assists difference
+           TOV_Diff = Home_TOV - Away_TOV,  # Turnovers difference
+           TRB_Diff = Home_TRB - Away_TRB)  # Total rebounds difference
+  
+  return(data)
+}
+
+data <- prepare_features(data)
+
+# Define input (X) and target variable (Y)
+X <- data %>%
+  select(ELO_Diff, FG_Diff, AST_Diff, TOV_Diff, TRB_Diff)  # Select key features
+
+Y <- ifelse(data$Margin > 0, 1, 0)  # 1 if home team wins, 0 otherwise
+
+```
+
+```{r}
+set.seed(123)
+trainIndex <- createDataPartition(Y, p = 0.8, list = FALSE)
+X_train <- X[trainIndex, ]
+Y_train <- Y[trainIndex]
+X_test <- X[-trainIndex, ]
+Y_test <- Y[-trainIndex]
+
+# Check if Y variables are factors
+if(!is.factor(Y_train)) {
+  Y_train <- factor(Y_train)
+}
+if(!is.factor(Y_test)) {
+  Y_test <- factor(Y_test)
+}
+
+```
+
+```{r}
+evaluate_model <- function(method, X_train, Y_train, X_test, Y_test) {
+  # Ensure factors have valid R variable names as levels
+  Y_train <- factor(Y_train)
+  Y_test <- factor(Y_test)
+  levels(Y_train) <- make.names(levels(Y_train))
+  levels(Y_test) <- make.names(levels(Y_test))
+  
+  # Get class levels
+  classLevels <- levels(Y_train)
+  
+  # Set up training control
+  train_control <- trainControl(
+    method = "cv",
+    number = 5,
+    classProbs = TRUE,
+    summaryFunction = twoClassSummary
+  )
+  
+  # Train the model
+  model <- train(
+    x = X_train,
+    y = Y_train,
+    method = method,
+    trControl = train_control,
+    metric = "ROC",
+    preProcess = c("center", "scale")
+  )
+  
+  # Predict on test set
+  predictions <- predict(model, X_test)
+  prob_predictions <- predict(model, X_test, type = "prob")
+  
+  # Calculate metrics
+  conf_matrix <- confusionMatrix(predictions, Y_test)
+  
+  # Make sure to use the second column name correctly for ROC calculation
+  positive_class <- levels(Y_train)[2]
+  roc_obj <- roc(as.numeric(Y_test == positive_class), prob_predictions[, positive_class])
+  
+  metrics <- c(
+    Accuracy = conf_matrix$overall["Accuracy"],
+    Precision = conf_matrix$byClass["Pos Pred Value"],
+    Recall = conf_matrix$byClass["Sensitivity"],
+    F1 = conf_matrix$byClass["F1"],
+    ROC_AUC = auc(roc_obj)
+  )
+  
+  return(list(metrics = metrics, model = model))
+}
+
+
+# Create a list to store the actual model objects
+model_objects <- list()
+
+models <- c("glm", "rf", "knn", "svmRadial", "nb", "xgbTree")
+results <- data.frame(Model = models, Accuracy = NA, Precision = NA, Recall = NA, F1 = NA, ROC_AUC = NA)
+
+for (i in 1:length(models)) {
+  # Try to evaluate the model, with error handling
+  tryCatch({
+    result <- evaluate_model(models[i], X_train, Y_train, X_test, Y_test)
+    metrics <- result$metrics
+    model_objects[[models[i]]] <- result$model
+    results[i, 2:6] <- metrics
+  }, error = function(e) {
+    cat("Error in model", models[i], ":", e$message, "\n")
+    # Set metrics to NA for this model
+    results[i, 2:6] <- NA
+  })
+}
+
+# Save the successful models
+for (model_name in names(model_objects)) {
+  saveRDS(model_objects[[model_name]], paste0(model_name, "_model.rds"))
+}
+
+# Specifically save the logistic regression model if it exists
+if ("glm" %in% names(model_objects)) {
+  saveRDS(model_objects[["glm"]], "logreg_model.rds")
+}
+```
+
+```{r}
+# Reshape data for plotting
+library(reshape2)
+results_melted <- melt(results, id.vars = "Model")
+
+# Plot model performance
+ggplot(results_melted, aes(x = Model, y = value, fill = variable)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Model Performance Comparison", x = "Model", y = "Score") +
+  theme_minimal()
+
+```
+
+```{r}
+run_full_analysis <- function(data) {
+  # Compute ELO ratings
+  data <- compute_elo_ratings(data)
+  
+  # Feature engineering
+  data <- prepare_features(data)
+  
+  # Split data
+  set.seed(123)
+  trainIndex <- createDataPartition(Y, p = 0.8, list = FALSE)
+  X_train <- X[trainIndex, ]
+  Y_train <- Y[trainIndex]
+  X_test <- X[-trainIndex, ]
+  Y_test <- Y[-trainIndex]
+  
+  # Train models and evaluate
+  models <- c("glm", "rf", "knn", "svmRadial", "nb", "xgbTree")
+  results <- data.frame(Model = models, Accuracy = NA, Precision = NA, Recall = NA, F1 = NA, ROC_AUC = NA)
+  
+  for (i in 1:length(models)) {
+    metrics <- evaluate_model(models[i], X_train, Y_train, X_test, Y_test)
+    results[i, 2:6] <- metrics
+  }
+  
+  # Visualization
+  results_melted <- melt(results, id.vars = "Model")
+  ggplot(results_melted, aes(x = Model, y = value, fill = variable)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(title = "Model Performance Comparison", x = "Model", y = "Score") +
+    theme_minimal()
+  
+  return(results)
+}
+
+# Run the full analysis
+final_results <- run_full_analysis(data)
+print(final_results)
+
+```
+
+
+```{r}
+install.packages("probably")
+
+install.packages("brglm")
+```
+
+
+```{r}
+historical_data <- read.csv("C:\\Users\\seani\\OneDrive - University of Illinois - Urbana\\Desktop\\BettingModel\\BettingModel\\NBA_raw.csv") 
+
+
+
+```
+
+# Robust Logistic Regression
+
+```{r}
+# ROBUST LOGISTIC REGRESSION - RAW FEATURES ONLY
+# ---------------------------------------------
+library(tidyverse)
+library(caret)
+library(pROC)
+
+set.seed(123)  # Reproducibility
+
+# 1. DATA PREPARATION
+# -------------------
+historical_data <- historical_data %>%
+  mutate(
+    outcome = factor(ifelse(Margin > 0, "Win", "Loss"), 
+                    levels = c("Loss", "Win"))
+  ) 
+
+# 2. FEATURE SELECTION
+# --------------------
+# Remove near-zero variance and highly correlated features
+preproc <- preProcess(
+  historical_data %>% select(-outcome),
+  method = c("nzv", "corr")
+)
+
+# 3. TEMPORAL SPLITTING
+# ---------------------
+time_folds <- createTimeSlices(
+  y = 1:nrow(historical_data),
+  initialWindow = floor(nrow(historical_data) * 0.7),
+  horizon = floor(nrow(historical_data) * 0.2),
+  fixedWindow = TRUE
+)
+
+# 4. MODEL TRAINING
+# -----------------
+train_control <- trainControl(
+  method = "cv",
+  index = time_folds$train,
+  indexOut = time_folds$test,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  allowParallel = TRUE,
+  sampling = "up"
+)
+
+# Define raw features (excluding differentials)
+features <- historical_data %>% 
+  select(Home_FG, Home_FGA, Home_FGP, Home_3P, Home_3PA, Home_3PP,
+         Home_2P, Home_2PA, Home_2PP, Home_FT, Home_FTA, Home_FTP,
+         Home_ORB, Home_DRB, Home_TRB, Home_AST, Home_STL, Home_BLK,
+         Home_TOV, Home_PF,
+         Away_FG, Away_FGA, Away_FGP, Away_3P, Away_3PA, Away_3PP,
+         Away_2P, Away_2PA, Away_2PP, Away_FT, Away_FTA, Away_FTP,
+         Away_ORB, Away_DRB, Away_TRB, Away_AST, Away_STL, Away_BLK,
+         Away_TOV, Away_PF)
+
+# Train model with regularization
+model <- train(
+  x = features,
+  y = historical_data$outcome,
+  method = "glmnet",
+  family = "binomial",
+  trControl = train_control,
+  metric = "ROC",
+  tuneGrid = expand.grid(
+    alpha = seq(0, 1, by = 0.25),  # Mix of L1/L2 regularization
+    lambda = 10^seq(-4, 0, length = 10)
+  ),
+  preProcess = c("center", "scale")
+)
+
+# 5. MODEL EVALUATION
+# -------------------
+predictions <- predict(model, newdata = features, type = "prob")
+
+metrics <- data.frame(
+  Model = "Raw_Features_Model",
+  Accuracy = confusionMatrix(
+    predict(model, features),
+    historical_data$outcome,
+    positive = "Win"
+  )$overall["Accuracy"],
+  ROC_AUC = roc(
+    historical_data$outcome,
+    predictions[, "Win"]
+  )$auc,
+  Brier_Score = mean((predictions[, "Win"] - (historical_data$outcome == "Win"))^2)
+)
+
+# 6. OUTPUT & VISUALIZATION
+# -------------------------
+saveRDS(model, "raw_features_model.rds")
+
+# Feature Importance (Top 20)
+var_imp <- varImp(model)$importance
+var_imp %>%
+  arrange(desc(Overall)) %>%
+  head(20) %>%
+  ggplot(aes(x = reorder(rownames(.), Overall), y = Overall)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Top 20 Predictive Features", 
+       x = "", 
+       y = "Importance") +
+  theme_minimal()
+
+# ROC Curve
+ggroc(roc(historical_data$outcome, predictions[, "Win"])) +
+  geom_abline(slope = 1, intercept = 1, linetype = "dashed") +
+  labs(title = paste("ROC Curve (AUC =", round(metrics$ROC_AUC, 3), ")"))
+```
+
+# Gradient Boost vs. GLM
+
+```{r}
+# CORRECTED BASELINE MODEL COMPARISON
+# ----------------------------------
+library(tidyverse)
+library(caret)
+library(pROC)
+library(ggpubr)
+
+set.seed(123)
+
+# 1. DATA PREPARATION
+# -------------------
+baseline_data <- historical_data %>%
+  mutate(outcome = factor(ifelse(Margin > 0, "Win", "Loss"))) %>%
+  select(-Margin) %>%  # Remove target leakage
+  drop_na()
+
+# 2. MODEL TRAINING SETUP
+# -----------------------
+train_control <- trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 3,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final"  # Changed to "final" for proper ROC calculation
+)
+
+# 3. TRAIN MODELS
+# ---------------
+# Logistic Regression
+logreg_baseline <- train(
+  x = baseline_data %>% select(-outcome),
+  y = baseline_data$outcome,
+  method = "glm",
+  family = "binomial",
+  trControl = train_control,
+  metric = "ROC"
+)
+
+# Gradient Boosting
+gbm_baseline <- train(
+  x = baseline_data %>% select(-outcome),
+  y = baseline_data$outcome,
+  method = "xgbTree",
+  trControl = train_control,
+  metric = "ROC",
+  tuneLength = 1
+)
+
+# 4. METRICS CALCULATION (FIXED)
+# ------------------------------
+calculate_metrics <- function(model) {
+  # Get the final predictions (already aggregated by trainControl)
+  preds <- model$pred %>% 
+    filter(Resample == "FinalModel")  # Use the final model predictions
+  
+  if(nrow(preds) == 0) {
+    # Fallback: use all predictions if "FinalModel" not available
+    preds <- model$pred %>% 
+      arrange(rowIndex) %>% 
+      group_by(rowIndex) %>% 
+      summarize(Win = mean(Win), obs = first(obs))
+  }
+  
+  # Ensure we have predictions for all observations
+  full_preds <- data.frame(rowIndex = 1:nrow(baseline_data)) %>% 
+    left_join(preds, by = "rowIndex")
+  
+  # Calculate confusion matrix
+  cm <- confusionMatrix(
+    data = factor(ifelse(full_preds$Win > 0.5, "Win", "Loss"), 
+    levels = c("Loss", "Win")),
+    reference = baseline_data$outcome,
+    positive = "Win"
+  )
+  
+  # Calculate ROC
+  roc_obj <- roc(
+    response = baseline_data$outcome,
+    predictor = full_preds$Win,
+    quiet = TRUE
+  )
+  
+  # Return all metrics
+  list(
+    Accuracy = cm$overall["Accuracy"],
+    Precision = cm$byClass["Precision"],
+    Recall = cm$byClass["Recall"],
+    F1 = cm$byClass["F1"],
+    ROC_AUC = auc(roc_obj),
+    Sensitivity = cm$byClass["Sensitivity"],
+    Specificity = cm$byClass["Specificity"]
+  )
+}
+
+# Get metrics for both models
+metrics <- bind_rows(
+  calculate_metrics(logreg_baseline) %>% mutate(Model = "Logistic Regression"),
+  calculate_metrics(gbm_baseline) %>% mutate(Model = "Gradient Boosting")
+)
+
+# 5. VISUALIZATION (FIXED)
+# ------------------------
+# Prepare ROC data
+roc_logreg <- roc(
+  response = baseline_data$outcome,
+  predictor = predict(logreg_baseline, newdata = baseline_data, type = "prob")[, "Win"],
+  quiet = TRUE
+)
+
+roc_gbm <- roc(
+  response = baseline_data$outcome,
+  predictor = predict(gbm_baseline, newdata = baseline_data, type = "prob")[, "Win"],
+  quiet = TRUE
+)
+
+# Create ROC plot
+roc_plot <- ggroc(list("Logistic" = roc_logreg, "GBM" = roc_gbm)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+  labs(title = "Baseline ROC Curves",
+       subtitle = paste("Logistic AUC =", round(metrics$ROC_AUC[1], 3),
+                       "| GBM AUC =", round(metrics$ROC_AUC[2], 3)),
+       x = "False Positive Rate",
+       y = "True Positive Rate") +
+  theme_minimal()
+
+# 6. RESULTS OUTPUT
+# -----------------
+# Print metrics
+print(metrics)
+
+# Show ROC plot
+print(roc_plot)
+
+# Save models
+saveRDS(logreg_baseline, "logreg_baseline.rds")
+saveRDS(gbm_baseline, "gbm_baseline.rds")
+```
+
+
+
+
+
+```{r}
+# BASELINE MODEL COMPARISON (RAW FEATURES ONLY)
+# --------------------------------------------
+library(tidyverse)
+library(caret)
+library(pROC)
+library(ggpubr)
+
+set.seed(123)
+
+# 1. DATA PREPARATION (NO FEATURE ENGINEERING)
+# --------------------------------------------
+baseline_data <- historical_data %>%
+  mutate(outcome = factor(ifelse(Margin > 0, "Win", "Loss"))) %>%
+  select(-Margin) %>%  # Remove target leakage
+  drop_na()
+
+# 2. MODEL TRAINING SETUP
+# -----------------------
+train_control <- trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 3,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = TRUE
+)
+
+# 3. TRAIN BASELINE MODELS
+# ------------------------
+# Logistic Regression (no regularization)
+logreg_baseline <- train(
+  x = baseline_data %>% select(-outcome),
+  y = baseline_data$outcome,
+  method = "glm",
+  family = "binomial",
+  trControl = train_control,
+  metric = "ROC"
+)
+
+# Gradient Boosting (default parameters)
+gbm_baseline <- train(
+  x = baseline_data %>% select(-outcome),
+  y = baseline_data$outcome,
+  method = "xgbTree",
+  trControl = train_control,
+  metric = "ROC",
+  tuneLength = 1  # Minimal tuning for baseline
+)
+
+# 4. COMPARE PERFORMANCE
+# ----------------------
+get_baseline_metrics <- function(model) {
+  preds <- model$pred %>% 
+    arrange(rowIndex) %>% 
+    slice(1:nrow(baseline_data))  # Ensure 1:1 mapping
+  
+  cm <- confusionMatrix(
+    data = factor(ifelse(preds$Win > 0.5, "Win", "Loss"), levels = c("Loss", "Win")),
+    reference = baseline_data$outcome,
+    positive = "Win"
+  )
+  
+  roc_obj <- roc(
+    response = baseline_data$outcome,
+    predictor = preds$Win,
+    quiet = TRUE
+  )
+  
+  data.frame(
+    Accuracy = cm$overall["Accuracy"],
+    Precision = cm$byClass["Precision"],
+    Recall = cm$byClass["Recall"],
+    F1 = cm$byClass["F1"],
+    ROC_AUC = auc(roc_obj)
+  )
+}
+
+# Create comparison table
+baseline_metrics <- bind_rows(
+  get_baseline_metrics(logreg_baseline) %>% mutate(Model = "Logistic Regression"),
+  get_baseline_metrics(gbm_baseline) %>% mutate(Model = "Gradient Boosting")
+)
+
+# 5. VISUALIZATION
+# ----------------
+# ROC Curves
+roc_data <- bind_rows(
+  data.frame(
+    Sensitivity = roc(logreg_baseline$pred$Win, 
+                     baseline_data$outcome[logreg_baseline$pred$rowIndex])$sensitivities,
+    Specificity = roc(logreg_baseline$pred$Win, 
+                     baseline_data$outcome[logreg_baseline$pred$rowIndex])$specificities,
+    Model = "Logistic Regression"
+  ),
+  data.frame(
+    Sensitivity = roc(gbm_baseline$pred$Win, 
+                     baseline_data$outcome[gbm_baseline$pred$rowIndex])$sensitivities,
+    Specificity = roc(gbm_baseline$pred$Win, 
+                     baseline_data$outcome[gbm_baseline$pred$rowIndex])$specificities,
+    Model = "Gradient Boosting"
+  )
+)
+
+roc_plot <- ggplot(roc_data, aes(x = 1 - Specificity, y = Sensitivity, color = Model)) +
+  geom_line(linewidth = 1) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+  labs(title = "Baseline ROC Curves (Raw Features Only)",
+       x = "False Positive Rate",
+       y = "True Positive Rate") +
+  theme_minimal()
+
+# 6. RESULTS OUTPUT
+# -----------------
+print(baseline_metrics)
+print(roc_plot)
+
+# Save baseline models
+saveRDS(logreg_baseline, "logreg_baseline.rds")
+saveRDS(gbm_baseline, "gbm_baseline.rds")
+```
+
